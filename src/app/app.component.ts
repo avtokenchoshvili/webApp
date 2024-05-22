@@ -18,6 +18,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 import { LoadingComponent } from "./components/loading/loading.component";
 import { StartButtonComponent } from "./components/start-button/start-button.component";
 import { FormsModule, ReactiveFormsModule } from '@angular/forms';
+import { Easing } from '@tweenjs/tween.js';
+import TWEEN from '@tweenjs/tween.js';
 
 @Component({
     selector: 'app-root',
@@ -41,14 +43,17 @@ export class AppComponent implements OnInit, AfterViewInit {
   @ViewChild('canvas') private canvasRef!: ElementRef;
   private scene!: THREE.Scene;
   private camera!: THREE.PerspectiveCamera;
+  private secondaryCamera!: THREE.PerspectiveCamera;
   private renderer!: THREE.WebGLRenderer;
   private wall!: THREE.Mesh;
   private topDisk!: THREE.Mesh;
   private bottomDisk!: THREE.Mesh;
   private cards: THREE.Mesh[] = [];
-  private group!: THREE.Group; // Group to contain wall and cards
-  private targetRotationX = 0; // Rotation around the X-axis
-  private targetRotationY = 0; // Rotation around the Y-axis
+  private group!: THREE.Group;
+  private raycaster = new THREE.Raycaster();
+  private mouse = new THREE.Vector2();
+  private targetRotationX = 0;
+  private targetRotationY = 0;
   private mouseDown = false;
   private mouseX = 0;
   private mouseY = 0;
@@ -56,7 +61,7 @@ export class AppComponent implements OnInit, AfterViewInit {
   private mouseYOnMouseDown = 0;
   private targetRotationXOnMouseDown = 0;
   private targetRotationYOnMouseDown = 0;
-
+  isControlKeyPressed!:boolean
   private images = [
     'https://letsenhance.io/static/8f5e523ee6b2479e26ecc91b9c25261e/1015f/MainAfter.jpg',
     'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRS1u05OPc7MSt9f5Dg2QMSbRPu_FHowIjog-jxeSwHIw&s',
@@ -65,6 +70,9 @@ export class AppComponent implements OnInit, AfterViewInit {
     'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRS1u05OPc7MSt9f5Dg2QMSbRPu_FHowIjog-jxeSwHIw&s',
     'https://images.unsplash.com/reserve/bOvf94dPRxWu0u3QsPjF_tree.jpg?ixid=M3wxMjA3fDB8MXxzZWFyY2h8M3x8bmF0dXJhbHxlbnwwfHx8fDE3MTYyODQ0MzN8MA&ixlib=rb-4.0.3',
   ];
+
+  private initialCameraPosition = new THREE.Vector3();
+  private initialCameraLookAt = new THREE.Vector3();
 
   ngOnInit() { }
 
@@ -81,7 +89,16 @@ export class AppComponent implements OnInit, AfterViewInit {
 
     // Camera
     this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, 1000);
-    this.camera.position.z = 700;
+    this.camera.position.set(0, 0, 700);
+    this.initialCameraPosition.copy(this.camera.position);
+
+    // Store initial camera look at
+    this.camera.lookAt(0, 0, 0);
+    this.camera.getWorldDirection(this.initialCameraLookAt);
+
+    // Secondary camera
+    this.secondaryCamera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, 1000);
+    this.secondaryCamera.position.set(0, 500, 1500);
 
     // Renderer with anti-aliasing enabled
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -91,9 +108,10 @@ export class AppComponent implements OnInit, AfterViewInit {
     this.group = new THREE.Group();
     this.scene.add(this.group);
 
-    // Create the red wall
+    // Create the red wall and disks
     this.createWall();
     this.createDisks();
+
     // Add cards
     this.addCards();
 
@@ -107,26 +125,28 @@ export class AppComponent implements OnInit, AfterViewInit {
   }
 
   private createWall() {
-    const geometry = new THREE.CylinderGeometry(300, 300, 200, 32, 1, true);
+    const geometry = new THREE.CylinderGeometry(300, 300, 600, 32, 1, true);
     const material = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide });
     this.wall = new THREE.Mesh(geometry, material);
-    this.wall.rotation.y = Math.PI / 2; // Rotate to make it face the camera properly
-    this.group.add(this.wall); // Add wall to the group
+    this.wall.rotation.y = Math.PI / 2;
+    this.group.add(this.wall);
   }
+
   private createDisks() {
     const geometry = new THREE.CircleGeometry(300, 32);
     const material = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide });
 
     this.topDisk = new THREE.Mesh(geometry, material);
-    this.topDisk.position.y = 100;
+    this.topDisk.position.y = 300;
     this.topDisk.rotation.x = Math.PI / 2;
     this.group.add(this.topDisk);
 
     this.bottomDisk = new THREE.Mesh(geometry, material);
-    this.bottomDisk.position.y = -100;
+    this.bottomDisk.position.y = -300;
     this.bottomDisk.rotation.x = -Math.PI / 2;
     this.group.add(this.bottomDisk);
   }
+
   private addCards() {
     const geometry = new THREE.PlaneGeometry(100, 150);
 
@@ -134,11 +154,9 @@ export class AppComponent implements OnInit, AfterViewInit {
 
     for (let i = 0; i < this.images.length; i++) {
       loader.load(this.images[i], (texture) => {
-        // Apply texture settings
         texture.minFilter = THREE.LinearMipMapLinearFilter;
         texture.magFilter = THREE.LinearFilter;
 
-        // Enable anisotropic filtering if supported
         const anisotropy = this.renderer.capabilities.getMaxAnisotropy();
         texture.anisotropy = anisotropy;
 
@@ -148,17 +166,41 @@ export class AppComponent implements OnInit, AfterViewInit {
 
         card.position.x = Math.cos(angle) * 300;
         card.position.z = Math.sin(angle) * 300;
-        card.position.y = 0; // Keep it centered vertically on the wall
-        card.rotation.y = -angle + Math.PI / 2; // Face the camera
-        this.group.add(card); // Add card to the group
+        card.position.y = 0;
+        card.rotation.y = -angle + Math.PI / 2;
+        card.userData = { id: i };
+
+        this.group.add(card);
         this.cards.push(card);
       });
     }
   }
 
+  private onCardClick(card: THREE.Mesh) {
+    const targetPosition = new THREE.Vector3();
+    card.getWorldPosition(targetPosition);
+
+    // Calculate new camera position
+    const newCameraPosition = targetPosition.clone().add(new THREE.Vector3(0, 0, 200));
+
+    // Tween camera position
+    new TWEEN.Tween(this.camera.position)
+      .to({ x: newCameraPosition.x, y: newCameraPosition.y, z: newCameraPosition.z }, 1000)
+      .easing(Easing.Quadratic.InOut)
+      .start();
+
+    // Tween camera look at
+    new TWEEN.Tween(this.camera)
+      .to({ x: targetPosition.x, y: targetPosition.y, z: targetPosition.z }, 1000)
+      .easing(Easing.Quadratic.InOut)
+      .onUpdate(() => this.camera.lookAt(targetPosition))
+      .start();
+  }
+
   private animate() {
     requestAnimationFrame(() => this.animate());
     this.renderer.render(this.scene, this.camera);
+    TWEEN.update();
   }
 
   @HostListener('window:resize', ['$event'])
@@ -170,10 +212,62 @@ export class AppComponent implements OnInit, AfterViewInit {
 
   @HostListener('window:wheel', ['$event'])
   onMouseWheel(event: WheelEvent) {
-    const delta = Math.sign(event.deltaY);
-    this.targetRotationY += delta * 0.05; // Adjust this value to control the speed
+    if (event.ctrlKey) {
+      this.switchToSecondaryCamera();
+    } else {
+      const delta = Math.sign(event.deltaY);
+      this.targetRotationY += delta * 0.05;
+      this.updateGroupRotation();
+    }
+  }
 
-    this.updateGroupRotation();
+  private switchToSecondaryCamera() {
+    const newCameraPosition = { x: this.secondaryCamera.position.x, y: this.secondaryCamera.position.y, z: this.secondaryCamera.position.z };
+    const target = new THREE.Vector3(0, 0, 0);
+
+    new TWEEN.Tween(this.camera.position)
+      .to(newCameraPosition, 1000)
+      .easing(Easing.Quadratic.InOut)
+      .start();
+
+    new TWEEN.Tween(this.camera)
+      .to({ lookAt: target }, 1000)
+      .easing(Easing.Quadratic.InOut)
+      .onUpdate(() => this.camera.lookAt(target))
+      .start();
+  }
+
+  private resetToInitialCamera() {
+    const initialPosition = this.initialCameraPosition;
+    const initialLookAt = this.initialCameraLookAt;
+
+    // Tween camera position back to initial
+    new TWEEN.Tween(this.camera.position)
+      .to({ x: initialPosition.x, y: initialPosition.y, z: initialPosition.z }, 1000)
+      .easing(Easing.Quadratic.InOut)
+      .start();
+
+    // Tween camera look at back to initial
+    new TWEEN.Tween(this.camera)
+      .to({ lookAt: initialLookAt }, 1000)
+      .easing(Easing.Quadratic.InOut)
+      .onUpdate(() => this.camera.lookAt(initialLookAt))
+      .start();
+  }
+
+  @HostListener('window:keydown', ['$event'])
+  onKeyDown(event: KeyboardEvent) {
+    if (event.key === 'Control') {
+      this.isControlKeyPressed = true;
+    }
+  }
+
+  @HostListener('window:keyup', ['$event'])
+  onKeyUp(event: KeyboardEvent) {
+    if (event.key === 'Control') {
+      this.isControlKeyPressed = false;
+      this.resetToInitialCamera();
+    }
   }
 
   @HostListener('window:mousedown', ['$event'])
@@ -192,8 +286,8 @@ export class AppComponent implements OnInit, AfterViewInit {
       this.mouseY = event.clientY;
       const deltaX = this.mouseX - this.mouseXOnMouseDown;
       const deltaY = this.mouseY - this.mouseYOnMouseDown;
-      this.targetRotationX = this.targetRotationXOnMouseDown + (deltaY * 0.01); // Adjust this value to control the sensitivity
-      this.targetRotationY = this.targetRotationYOnMouseDown + (deltaX * 0.01); // Adjust this value to control the sensitivity
+      this.targetRotationX = this.targetRotationXOnMouseDown + (deltaY * 0.01);
+      this.targetRotationY = this.targetRotationYOnMouseDown + (deltaX * 0.01);
       this.updateGroupRotation();
     }
   }
@@ -201,6 +295,20 @@ export class AppComponent implements OnInit, AfterViewInit {
   @HostListener('window:mouseup')
   onMouseUp() {
     this.mouseDown = false;
+  }
+
+  @HostListener('window:click', ['$event'])
+  onClick(event: MouseEvent) {
+    this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    this.mouse.y = - (event.clientY / window.innerHeight) * 2 + 1;
+
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+    const intersects = this.raycaster.intersectObjects(this.cards);
+
+    if (intersects.length > 0) {
+      const clickedCard = intersects[0].object as THREE.Mesh;
+      this.onCardClick(clickedCard);
+    }
   }
 
   private updateGroupRotation() {
